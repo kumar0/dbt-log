@@ -1,0 +1,24 @@
+metric,value
+Window analysed,2026-07-15 00:00 - 2026-07-15 22:00 UTC
+Session active in window,22:00:00
+Max executors allocated,7.0
+Avg executors allocated (time-weighted),6.8
+Executor-hours consumed (approx),150.7
+"Worker-hours incl. driver (approx, billing proxy)",172.7
+Max executors needed,223.0
+Over/under-provisioned,under (allocated 7 vs needed 223 at peak)
+Worker utilization (avg),69.5%
+Worker utilization (max),100.0%
+"Stage skewness (max, >1 = skewed)",8.68
+"Job skewness (max, >1 = skewed)",3.27
+Driver JVM heap used (peak),8.93 GB
+Driver JVM heap usage % (peak),70.8%
+All-executor JVM heap used (peak),110.25 GB
+Driver CPU load (avg),2.6%
+Driver CPU load (max),13.5%
+Shuffle bytes written (total),48.46 GB
+S3 bytes read (total),158.03 GB
+S3 bytes written (total),92.26 GB
+Records read (total),"2,400,046,485"
+Tasks completed,"162,589"
+Errors by category,OUT_OF_MEMORY=2

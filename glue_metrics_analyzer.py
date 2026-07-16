@@ -54,8 +54,8 @@ AWS_REGION = "eu-west-1"
 NAMESPACES = ["Glue", "Glue Observability"]
 
 # Validated categorical palette (light surface)
-C_BLUE, C_AQUA, C_YELLOW, C_VIOLET, C_RED = (
-    "#2a78d6", "#1baf7a", "#eda100", "#4a3aa7", "#e34948",
+C_BLUE, C_AQUA, C_YELLOW, C_VIOLET, C_RED, C_ORANGE = (
+    "#2a78d6", "#1baf7a", "#eda100", "#4a3aa7", "#e34948", "#eb6834",
 )
 
 _CHART_LAYOUT = dict(
@@ -386,7 +386,7 @@ def plot_timeseries(ts_df, session_name):
     add(2, 2, "s3.filesystem.write_bytes", "Sum", "S3 write", C_AQUA, scale=MB)
     add(2, 2, "aggregate.shuffleBytesWritten", "Sum", "shuffle written", C_RED, scale=MB)
     if has_obs:
-        add(3, 1, "workerUtilization", "Average", "worker utilization", C_AQUA, scale=100)
+        add(3, 1, "workerUtilization", "Average", "worker utilization", C_ORANGE, scale=100)
         add(3, 2, "skewness.stage", "Maximum", "stage skewness", C_RED)
         add(3, 2, "skewness.job", "Maximum", "job skewness", C_YELLOW, dash="dot")
 
