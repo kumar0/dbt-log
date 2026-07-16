@@ -28,22 +28,35 @@ slowest-nodes chart.
 
 ## glue_metrics_analyzer.py
 
-Pulls the session's custom metrics from the CloudWatch `Glue` namespace.
+Pulls the session's custom metrics from the CloudWatch `Glue` namespace and,
+when enabled on the session (`--enable-observability-metrics`, Glue 4.0+),
+the `Glue Observability` namespace (worker utilization, stage/job skewness,
+error categories). Works identically on Glue 4 and Glue 5.
+
 `JobRunId` = the interactive session name from the dbt profile; `JobName`
-(the auto-generated session UUID) is discovered automatically.
+(the auto-generated session UUID) is discovered automatically. Counters whose
+named series is empty fall back to the `JobRunId=ALL` roll-up automatically.
 
 ```python
 result = analyze_session("<session-name-from-dbt-profile>")   # last 24h
 # or pass start=/end= datetimes (e.g. the run window from the log analyzer)
-result["summary"]     # workers, heap, CPU, shuffle, S3 I/O, tasks, disk spill
+result["summary"]     # workers, autoscaling usage, utilization, skewness,
+                      # heap, CPU, shuffle, S3 I/O, tasks, errors, disk spill
 result["metrics"]     # every discovered metric: min/avg/max/last/total
 result["timeseries"]  # raw datapoints (long format)
 ```
 
-Also renders 2x2 plotly time-series panels: executors, JVM heap, CPU load,
-data moved per interval.
+The summary includes an autoscaling usage view: time-weighted average
+executors allocated, executor-hours consumed, and approximate worker-hours
+including the driver (billing proxy) — not just the peak allocation.
 
-Note: CloudWatch `list_metrics` only sees metrics active in the last ~2 weeks.
+Renders plotly time-series panels: executors (allocated vs needed), JVM heap,
+CPU load, data moved per interval — plus worker utilization and skewness
+panels when observability metrics exist.
+
+Notes: CloudWatch `list_metrics` only sees metrics active in the last
+~2 weeks, and 60s-resolution data is retained 15 days (pass `period=300`
+for older runs).
 
 ## Offline self-tests
 
