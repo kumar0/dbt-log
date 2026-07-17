@@ -32,7 +32,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # ---------------------------------------------------------------- config ----
-AWS_PROFILE = "roprd1"
+AWS_PROFILE = "ro-prd1"
 AWS_REGION = "eu-west-1"
 LOG_GROUP = "CHANGE_ME"  # <-- EDIT: CloudWatch log group containing ecs/spinv/* streams
 

@@ -49,7 +49,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # ---------------------------------------------------------------- config ----
-AWS_PROFILE = "roprd1"
+AWS_PROFILE = "ro-prd1"
 AWS_REGION = "eu-west-1"
 NAMESPACES = ["Glue", "Glue Observability"]
 

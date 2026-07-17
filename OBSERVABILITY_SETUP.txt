@@ -1,0 +1,208 @@
+================================================================================
+ OBSERVABILITY SETUP - dbt on Glue interactive sessions (Fargate + Step Functions)
+================================================================================
+Goal: enable EVERY log/metric source Glue and dbt can produce, so the analyzer
+scripts in this repo (and the Spark UI) can explain performance problems that
+plain dbt logs cannot.
+
+The four data sources, what enables them, and which tool reads them:
+
+  source                        enabled by                              read with
+  ---------------------------   -------------------------------------   ------------------------------
+  1. dbt structured logs        DBT_LOG_FORMAT=json (+ debug level)     dbt_log_analyzer.py
+  2. Glue/Spark metrics         --enable-metrics,                       glue_metrics_analyzer.py
+     (CloudWatch namespaces       --enable-observability-metrics
+     "Glue","Glue Observability")
+  3. Spark driver/executor      --enable-continuous-cloudwatch-log      glue_session_log_analyzer.py
+     logs (CloudWatch)            (+ filter OFF for full verbosity)
+  4. Spark event logs (S3)      --enable-spark-ui +                     Spark History Server
+                                  --spark-event-logs-path                 (spark-ui/Dockerfile, port 18080)
+
+--------------------------------------------------------------------------------
+ STEP 1 - dbt profiles.yml (the dbt-glue target)
+--------------------------------------------------------------------------------
+Replace <ACCOUNT>, <bucket>, <glue_database> with your values. RUN_ID should be
+the Step Functions execution id (or any unique per-run value) passed to the
+Fargate task as an environment variable.
+
+    my_dbt_project:
+      target: prod
+      outputs:
+        prod:
+          type: glue
+          role_arn: arn:aws:iam::<ACCOUNT>:role/GlueInteractiveSessionRole
+          region: eu-west-1
+          glue_version: "5.0"              # observability metrics need >= 4.0
+          workers: 5
+          worker_type: G.1X
+          schema: <glue_database>
+          location: s3://<bucket>/dbt-data/
+          session_provisioning_timeout_in_seconds: 300
+          idle_timeout: 10                 # minutes of idle before session dies
+          query_timeout_in_minutes: 300
+          query-comment: "dbt-spinv"       # shows up inside Spark SQL text -> easy to find models in Spark UI
+
+          # ---- session identity: REQUIRED for glue_metrics_analyzer -------
+          glue_session_id: "dbt-spinv-{{ env_var('RUN_ID', 'adhoc') }}"
+          glue_session_reuse: true
+          # Without glue_session_reuse: true, dbt-glue appends __<role>__<uuid4>
+          # to the session id, so you can never predict the JobRunId dimension.
+          # With a per-run RUN_ID you get exactly one analyzable session per run:
+          #     analyze_session("dbt-spinv-<RUN_ID>")
+          # Do NOT set enable_session_per_model - it re-adds the uuid suffix and
+          # scatters one run's metrics over many sessions.
+
+          # ---- turn every log/metric source ON ----------------------------
+          default_arguments: "--enable-metrics=true, --enable-observability-metrics=true, --enable-continuous-cloudwatch-log=true, --enable-continuous-log-filter=false, --enable-auto-scaling=true, --enable-spark-ui=true, --spark-event-logs-path=s3://<bucket>/spark-events/"
+
+          # ---- extra spark conf (rolling event logs for long runs) --------
+          conf: "spark.eventLog.rolling.enabled=true --conf spark.eventLog.rolling.maxFileSize=128m"
+
+What each default_argument buys you:
+
+  --enable-metrics=true                  "Glue" CloudWatch namespace: executors
+                                         allocated/needed, JVM heap, CPU, shuffle,
+                                         S3 I/O, task/stage counts, disk spill.
+                                         Core input of glue_metrics_analyzer.
+  --enable-observability-metrics=true    "Glue Observability" namespace (Glue 4+):
+                                         workerUtilization, skewness.stage/job,
+                                         glue.error.<CATEGORY>. The analyzer's
+                                         utilization/skew panels stay empty
+                                         without it.
+  --enable-continuous-cloudwatch-log=true  Streams Spark driver + executor logs
+                                         to CloudWatch (log groups under
+                                         /aws-glue/...). This is the "what is
+                                         Spark actually doing" source read by
+                                         glue_session_log_analyzer.py.
+  --enable-continuous-log-filter=false   Glue filters "useless" Spark messages
+                                         by default. false = keep EVERYTHING
+                                         (scheduler, task, GC lines). Verbose,
+                                         but that is the point right now.
+  --enable-auto-scaling=true             Executors scale with load; makes the
+                                         allocated-vs-needed and executor-hours
+                                         views meaningful, and saves DPU cost.
+  --enable-spark-ui=true                 Write Spark event logs...
+  --spark-event-logs-path=s3://...       ...to this S3 prefix, one application
+                                         per session. Viewed with the history
+                                         server (STEP 4). NOTE: the Glue console
+                                         "Spark UI" tab only exists for ETL JOB
+                                         runs, not interactive sessions - the
+                                         history server is the only viewer here.
+
+--------------------------------------------------------------------------------
+ STEP 2 - dbt / Fargate container settings
+--------------------------------------------------------------------------------
+Environment variables on the Fargate task definition:
+
+    DBT_LOG_FORMAT=json      # REQUIRED - dbt_log_analyzer only parses JSON lines
+    DBT_LOG_LEVEL=debug      # max verbosity: per-node SQL sent to Glue, timing
+                             # detail, connection/session lifecycle events
+    RUN_ID=<sfn execution id>  # feeds glue_session_id in the profile
+
+(Equivalent CLI flags: dbt --log-format json --log-level debug run)
+
+Keep the awslogs log driver configuration as-is so streams stay named
+ecs/spinv/<task-uuid> in your existing log group.
+
+Debug logging is large. CloudWatch ingest is cheap relative to a stuck 12-hour
+model; revert DBT_LOG_LEVEL to info once the performance issue is solved, and
+put a retention policy (e.g. 30 days) on the log group.
+
+--------------------------------------------------------------------------------
+ STEP 3 - script configuration (this repo)
+--------------------------------------------------------------------------------
+All three analyzers now use AWS_PROFILE = "ro-prd1", AWS_REGION = "eu-west-1".
+The ro-prd1 profile must exist in %USERPROFILE%\.aws\config (Windows) and needs
+read permissions: logs:Describe*/Get*/FilterLogEvents, cloudwatch:ListMetrics/
+GetMetricData, s3:GetObject+ListBucket on the spark-events prefix.
+
+Still to edit by hand:
+  - dbt_log_analyzer.py  -> LOG_GROUP = your ECS log group (currently CHANGE_ME)
+
+Typical run (Jupyter):
+
+    from dbt_log_analyzer import analyze
+    r = analyze("ecs/spinv/<task-uuid>")          # which model is slow + window
+
+    from glue_metrics_analyzer import analyze_session
+    m = analyze_session("dbt-spinv-<RUN_ID>",     # cluster behaviour in window
+                        start=..., end=...)       # use window from step above
+    # discover_metrics prints the session UUID (JobName) - keep it for the next step
+
+    from glue_session_log_analyzer import analyze_session_logs
+    l = analyze_session_logs("<session-uuid>",    # Spark internals: stages, jobs,
+                             start=..., end=...)  # WARN/ERROR, GC/spill/OOM signals
+
+--------------------------------------------------------------------------------
+ STEP 4 - Spark UI on Windows (event logs from S3, profile ro-prd1)
+--------------------------------------------------------------------------------
+Prerequisites: Docker Desktop, AWS CLI v2 with the ro-prd1 profile configured.
+
+Build the image once (from this repo's root, PowerShell):
+
+    cd spark-ui
+    docker build -t glue-sparkui .
+
+OPTION A - sync the logs locally first (most reliable; works with SSO,
+VPC-locked buckets, flaky S3 auth - recommended):
+
+    aws s3 sync s3://<bucket>/spark-events C:\spark-events --profile ro-prd1
+    docker run --rm -p 18080:18080 `
+      -v C:\spark-events:/logs:ro `
+      -e LOG_DIR=file:/logs `
+      glue-sparkui
+
+OPTION B - read straight from S3 (live view of a run in progress):
+
+    # export short-lived credentials from the profile (works for SSO too)
+    $c = aws configure export-credentials --profile ro-prd1 | ConvertFrom-Json
+    docker run --rm -p 18080:18080 `
+      -e AWS_ACCESS_KEY_ID=$($c.AccessKeyId) `
+      -e AWS_SECRET_ACCESS_KEY=$($c.SecretAccessKey) `
+      -e AWS_SESSION_TOKEN=$($c.SessionToken) `
+      -e AWS_REGION=eu-west-1 `
+      -e LOG_DIR=s3a://<bucket>/spark-events/ `
+      glue-sparkui
+
+Then open  http://localhost:18080  - each Glue session appears as one Spark
+application (in-progress sessions show up too; refresh the page). Click one:
+
+  - "SQL / DataFrame" tab : every dbt model = one or more SQL executions. Your
+    query-comment string appears in the query text - search for the slow model.
+    Click a query to see the physical plan (full scans, join strategy, exchanges).
+  - "Stages" tab          : sort by duration. Inside a stage the task summary
+    table shows skew (max task time >> median) and the Shuffle Read/Write and
+    Spill (Disk) columns.
+  - "Executors" tab       : per-executor task counts, GC time, shuffle - uneven
+    numbers = skew; high GC = memory pressure (matches heap panel in the
+    metrics analyzer).
+
+Housekeeping: add an S3 lifecycle rule on s3://<bucket>/spark-events/ (expire
+after 60-90 days) - one file per session accumulates forever otherwise.
+
+--------------------------------------------------------------------------------
+ STEP 5 - performance triage workflow (why is it slow?)
+--------------------------------------------------------------------------------
+ 1. dbt_log_analyzer.analyze("ecs/spinv/<uuid>")
+      -> WHICH model is slow, its exact start/end window. (With debug logs you
+         also see the exact SQL dbt sent.)
+ 2. glue_metrics_analyzer.analyze_session("dbt-spinv-<RUN_ID>", start, end)
+      -> WHAT the cluster did in that window:
+         - workerUtilization low + skewness high      -> data skew (one hot key/partition)
+         - allocated << needed                        -> under-provisioned (raise workers /
+                                                         check auto-scaling max)
+         - heap near 100% / disk spill / OOM errors   -> memory pressure (bigger worker_type
+                                                         G.2X, or reduce shuffle partitions)
+         - huge shuffle bytes                         -> bad join order / missing pruning
+ 3. glue_session_log_analyzer.analyze_session_logs("<session-uuid>", start, end)
+      -> Spark's own account: slowest stages/jobs, repeated WARN/ERROR,
+         lost executors, GC overhead, spill messages.
+ 4. Spark UI (STEP 4) on the same window
+      -> WHY, at plan level: which stage inside the model's SQL, which join,
+         which exchange, which skewed task.
+
+Retention limits (don't wait to analyze):
+  - CloudWatch list_metrics only sees metrics active in the last ~2 weeks
+  - 60s metric resolution kept 15 days (pass period=300 for older runs)
+  - set log-group retention explicitly; S3 event logs live until lifecycle rule
+================================================================================
