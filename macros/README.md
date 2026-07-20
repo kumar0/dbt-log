@@ -140,9 +140,13 @@ Each run, per table:
    the last backup:
    - non-null `processedAt`: watermark — rows with
      `headers.processedAt > MAX(headers.processedAt)` already in the backup;
-   - **NULL `processedAt`**: invisible to a watermark, so they are captured
-     exactly with `EXCEPT ALL` over the NULL-processedAt subset
-     (duplicate-safe, scans only that subset).
+   - **NULL `processedAt`**: invisible to a watermark. NULL-row counts are
+     compared on both sides (plain `COUNT(*)`, one round trip); when the
+     source has more, the backup's NULL subset is refreshed with
+     `DELETE` + `INSERT ... SELECT`. Set operations are deliberately avoided:
+     Spark rewrites `EXCEPT ALL` into a `ReplicateRows`/`Generate` plan that
+     fails at runtime on Glue for wide/nested schemas (`BindReferences`
+     stage failure).
 2. **Delta convert** — `UPDATE ... SET headers.processedAt_ts =
    timestamp_millis(headers.processedAt)` restricted to rows not yet converted.
    Rows with NULL `processedAt` are intentionally untouched — NULL is their
@@ -265,7 +269,7 @@ Between steps, check the log and the control table
 | concern | handling |
 |---|---|
 | conversion | only non-null rows are updated; NULL rows keep a NULL `processedAt_ts` (correct value) |
-| delta backup | watermark can never see NULL rows → dedicated `EXCEPT ALL` leg captures them exactly |
+| delta backup | watermark can never see NULL rows → NULL-row counts compared source vs backup; when the source has more, the backup's NULL subset is refreshed (`DELETE` + `INSERT ... SELECT`) |
 | verification | NULL counts and total counts compared source vs backup — a missing NULL row blocks finalize |
 
 ## Assumptions & limitations
@@ -274,9 +278,12 @@ Between steps, check the log and the control table
   `headers.processedAt` **greater** than the current backup maximum. A late row
   whose value *equals* the max is not delta-picked; verification then keeps the
   table in `converting` with a visible count mismatch (never a silent pass).
-- **`EXCEPT ALL` comparability**: the NULL-row delta compares full rows, which
-  requires comparable column types — tables containing **map** columns cannot
-  use it (Spark cannot compare maps).
+- **NULL-subset refresh assumes append-only tables** (like the watermark): the
+  NULL-row delta is detected by count comparison and applied by refreshing the
+  backup's NULL subset. If source rows were deleted (backup NULL count exceeds
+  source), the backup is left untouched, a warning is logged, and verification
+  keeps the table in `converting`. No full-row comparisons are performed, so
+  any column types (including maps) are fine.
 - **Table format**: tables must support row-level `UPDATE`, nested-field
   `ADD/DROP/RENAME COLUMN`, and `CREATE OR REPLACE TABLE` (e.g. Iceberg on
   Glue — the same operations the original macros already used).

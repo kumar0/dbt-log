@@ -7,8 +7,12 @@
        the last backup:
          - non-null processedAt: watermark, rows with
            headers.processedAt > MAX(headers.processedAt) already in backup
-         - NULL processedAt: watermark can never see these, so they are
-           captured exactly with EXCEPT ALL over the NULL-processedAt subset
+         - NULL processedAt: watermark can never see these. NULL-row counts
+           are compared on both sides; when the source has more, the backup's
+           NULL subset is refreshed (DELETE + INSERT ... SELECT). No set
+           operations: Spark's EXCEPT ALL rewrite (ReplicateRows/Generate)
+           fails at runtime on wide/nested schemas on Glue (BindReferences
+           stage failure), so it is deliberately avoided.
     2. DELTA CONVERT — UPDATE only rows not yet converted:
          headers.processedAt IS NOT NULL AND (processedAt_ts IS NULL OR
          unix_millis(processedAt_ts) != processedAt)
@@ -24,8 +28,10 @@
     - watermark uses strict '>': a late row whose processedAt EQUALS the
       current backup max is not delta-picked; verification then keeps the
       table in 'converting' with a count mismatch for manual inspection
-    - EXCEPT ALL (NULL-row delta) requires comparable column types; tables
-      with map-type columns cannot use it (Spark cannot compare maps)
+    - the NULL-subset refresh (DELETE + re-INSERT) assumes append-only
+      tables, same as the watermark; if source rows were deleted (backup
+      NULL count exceeds source), the backup is left untouched and a
+      warning is logged - verification blocks the table from 'converted'
 
   Usage:
     dbt run-operation migration_convert --vars '{source_db_name: mydb}'                    # all prepared tables
@@ -96,18 +102,28 @@
             {% do log("  delta backup: no new non-null rows", info=True) %}
           {% endif %}
 
-          {# ----- 1b. Delta backup: NULL processedAt rows (invisible to the watermark) ----- #}
-          {% set null_delta = mig_run_query(
-              "SELECT COUNT(*) FROM (" ~
-              "  SELECT * FROM " ~ src_table ~ " WHERE headers.processedAt IS NULL" ~
-              "  EXCEPT ALL" ~
-              "  SELECT * FROM " ~ bkp_table ~ " WHERE headers.processedAt IS NULL)").rows[0][0] | int %}
+          {# ----- 1b. Delta backup: NULL processedAt rows (invisible to the watermark) -----
+             No set operations here (see header): compare NULL-row counts and,
+             when the source has more, refresh the backup's NULL subset. #}
+          {% set nulls = mig_run_query(
+              "SELECT s.c, b.c FROM " ~
+              " (SELECT COUNT(*) AS c FROM " ~ src_table ~ " WHERE headers.processedAt IS NULL) s" ~
+              " CROSS JOIN " ~
+              " (SELECT COUNT(*) AS c FROM " ~ bkp_table ~ " WHERE headers.processedAt IS NULL) b").rows[0] %}
+          {% set src_null = nulls[0] | int %}
+          {% set bkp_null = nulls[1] | int %}
+          {% set null_delta = src_null - bkp_null %}
           {% if null_delta > 0 %}
-            {% do log("  delta backup: appending " ~ null_delta ~ " new NULL-processedAt row(s)", info=True) %}
+            {% do log("  delta backup: refreshing NULL-processedAt subset (source " ~ src_null ~
+                " vs backup " ~ bkp_null ~ ", " ~ null_delta ~ " new)", info=True) %}
+            {% do adapter.execute("DELETE FROM " ~ bkp_table ~ " WHERE headers.processedAt IS NULL") %}
             {% do adapter.execute("INSERT INTO " ~ bkp_table ~
-                " SELECT * FROM " ~ src_table ~ " WHERE headers.processedAt IS NULL" ~
-                " EXCEPT ALL" ~
-                " SELECT * FROM " ~ bkp_table ~ " WHERE headers.processedAt IS NULL") %}
+                " SELECT * FROM " ~ src_table ~ " WHERE headers.processedAt IS NULL") %}
+          {% elif null_delta < 0 %}
+            {% do log("  WARNING: backup has MORE NULL-processedAt rows (" ~ bkp_null ~
+                ") than source (" ~ src_null ~ ") - source rows deleted? Backup left untouched;" ~
+                " verification will keep this table in 'converting'", info=True) %}
+            {% set null_delta = 0 %}
           {% endif %}
 
           {# ----- 2. Delta convert (idempotent: only unconverted/drifted rows are touched) ----- #}
