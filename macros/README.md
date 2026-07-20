@@ -221,6 +221,45 @@ up manually once the migration is verified.
 
 ---
 
+## Runbook (dev1 example)
+
+The old one-shot invocation was:
+
+```bash
+## Migrate (OLD — replaced by the 3-phase commands below)
+dbt run-operation migrate_all_processed_at --profiles-dir ../profiles --target dev1 --vars "{\"run_id_string\":\"run_id\",
+\"source_db_name\":\"pbwm_dpiibc_bas_avqdf_dev1\",\"target_db_name\":\"pbwm_dpiibc_pre_parallel_dev1\",
+\"reference_db_name\":\"pbwm_dpiibc_pre_reference_dev1\",\"cut_over_db_name\":\"pbwm_dpiibc_pre_dev1\",\"backup_s3_location\":\"s3://
+dev1-bas-pbwm-booksrecord02-891377125915-eu-west-1/backup/data/pbwm_dpiibc_bas_avqdf_dev1/\"}" >migrate.log
+```
+
+Same environment, new macros — run in this order. Extra vars from the old
+command (`run_id_string`, `target_db_name`, `reference_db_name`,
+`cut_over_db_name`) are not used by these macros; passing them along is
+harmless if you reuse the same vars block.
+
+```bash
+## 1. Prepare — backup db + control table + backups + add processedAt_ts (run once)
+dbt run-operation migration_prepare --profiles-dir ../profiles --target dev1 --vars "{\"source_db_name\":\"pbwm_dpiibc_bas_avqdf_dev1\",\"backup_s3_location\":\"s3://dev1-bas-pbwm-booksrecord02-891377125915-eu-west-1/backup/data/pbwm_dpiibc_bas_avqdf_dev1/\"}" >prepare.log
+
+## 2. Convert — delta backup + delta convert + verify (repeat until every table reports CONVERTED)
+dbt run-operation migration_convert --profiles-dir ../profiles --target dev1 --vars "{\"source_db_name\":\"pbwm_dpiibc_bas_avqdf_dev1\"}" >convert.log
+
+##    ... or only specific tables
+dbt run-operation migration_convert --profiles-dir ../profiles --target dev1 --vars "{\"source_db_name\":\"pbwm_dpiibc_bas_avqdf_dev1\",\"tables\":\"table_a,table_b\"}" >convert.log
+
+## 3. Finalize — re-verify, drop old bigint, rename, verification report
+dbt run-operation migration_finalize --profiles-dir ../profiles --target dev1 --vars "{\"source_db_name\":\"pbwm_dpiibc_bas_avqdf_dev1\"}" >finalize.log
+
+## Rollback (if needed) — add rollback_confirm only when a finalized table must be restored from backup
+dbt run-operation migration_rollback --profiles-dir ../profiles --target dev1 --vars "{\"source_db_name\":\"pbwm_dpiibc_bas_avqdf_dev1\",\"tables\":\"table_a\"}" >rollback.log
+dbt run-operation migration_rollback --profiles-dir ../profiles --target dev1 --vars "{\"source_db_name\":\"pbwm_dpiibc_bas_avqdf_dev1\",\"tables\":\"table_a\",\"rollback_confirm\":true}" >rollback.log
+```
+
+Between steps, check the log and the control table
+(`pbwm_dpiibc_bas_avqdf_dev1_backup.migration_control`): every table must be
+`converted` before step 3, and step 3's log ends with the verification report.
+
 ## NULL `processedAt` handling (summary)
 
 | concern | handling |
