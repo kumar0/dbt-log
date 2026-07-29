@@ -96,6 +96,10 @@ docker run --rm -p 18080:18080 -v "$PWD/spark-events:/logs:ro" -e LOG_DIR=file:/
 # then open http://localhost:18080
 ```
 
+If your registry can't pull `apache/spark`, build `spark-ui/Dockerfile.tarball`
+from any internal Java 17 base image instead — and OBSERVABILITY_SETUP.txt
+STEP 4-ALT-2 covers running the history server on Windows with no Docker at all.
+
 Windows/PowerShell commands and a direct-from-S3 option are in
 `OBSERVABILITY_SETUP.txt` (STEP 4).
 

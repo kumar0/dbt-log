@@ -186,6 +186,79 @@ application (in-progress sessions show up too; refresh the page). Click one:
     numbers = skew; high GC = memory pressure (matches heap panel in the
     metrics analyzer).
 
+--------------------------------------------------------------------------------
+ STEP 4-ALT-1 - Docker build when the registry has no apache/spark image
+--------------------------------------------------------------------------------
+Use this when the org registry blocks Docker Hub and does not mirror
+apache/spark. Dockerfile.tarball (same folder) starts from any generic Java 17
+(or 11) base image and installs Spark from the official tarball. The build only
+uses ADD + tar - no apt/yum - so hardened/minimal base images work.
+
+You need three URLs/names from your platform team:
+
+  1. an approved Java 17 base image in the internal registry
+     (e.g. internal-registry.example.com/eclipse-temurin:17-jre-jammy)
+  2. the Artifactory/Nexus remote repo that proxies Apache downloads
+     (must serve dist/spark/spark-3.5.1/spark-3.5.1-bin-hadoop3.tgz)
+  3. the Artifactory/Nexus remote repo that proxies Maven Central
+     (for hadoop-aws-3.3.4.jar and aws-java-sdk-bundle-1.12.262.jar)
+
+Build:
+
+    cd spark-ui
+    docker build -f Dockerfile.tarball -t glue-sparkui `
+      --build-arg BASE_IMAGE=<internal-java17-image> `
+      --build-arg APACHE_MIRROR=<artifactory-apache-remote-url> `
+      --build-arg MAVEN_REPO=<artifactory-maven-central-url> .
+
+Run commands are identical to STEP 4 Options A and B above.
+
+--------------------------------------------------------------------------------
+ STEP 4-ALT-2 - no Docker: run the History Server natively on Windows
+--------------------------------------------------------------------------------
+The container is only a wrapper around a plain Java process; if Docker is not
+an option, run the history server directly. Uses the synced-logs flow (Option
+A), so no S3 jars and no credential export are needed - the AWS CLI with the
+ro-prd1 SSO profile does all the S3 access.
+
+  1. Java 17: any org-approved JDK/JRE works. No admin rights needed - the
+     Temurin 17 JRE ships as a .zip; extract it to e.g. C:\tools\jdk-17.
+
+  2. Spark: download spark-3.5.1-bin-hadoop3.tgz from your artifact proxy (or
+     https://archive.apache.org/dist/spark/spark-3.5.1/ if reachable), then
+
+         tar -xzf spark-3.5.1-bin-hadoop3.tgz -C C:\tools
+
+     (tar is built into Windows 10+; you get C:\tools\spark-3.5.1-bin-hadoop3)
+
+  3. Sync the event logs (same as Option A):
+
+         aws s3 sync s3://<bucket>/spark-events C:\spark-events --profile ro-prd1
+
+  4. Start the server. Spark's sbin scripts are bash-only, so on Windows invoke
+     the class directly (PowerShell):
+
+         & C:\tools\jdk-17\bin\java `
+           -cp "C:\tools\spark-3.5.1-bin-hadoop3\jars\*" `
+           -Dspark.history.fs.logDirectory=file:///C:/spark-events `
+           -Dspark.history.fs.update.interval=15s `
+           org.apache.spark.deploy.history.HistoryServer
+
+     Open http://localhost:18080. Ctrl+C stops it.
+
+  5. Notes:
+     - The "unable to load native-hadoop" / winutils WARN at startup is
+       harmless here (the server only reads local files). If it actually
+       errors on HADOOP_HOME/winutils, download winutils.exe for Hadoop 3.3.x
+       (github.com/cdarlint/winutils), put it in e.g. C:\tools\hadoop\bin and
+       set  $env:HADOOP_HOME = "C:\tools\hadoop"  before starting.
+     - To refresh: re-run the aws s3 sync in a second terminal; the server
+       picks up new/updated logs within 15s.
+     - Live direct-S3 read is possible natively too (copy the two jars from
+       STEP 4-ALT-1 item 3 into spark's jars\ folder and set the AWS_* env
+       vars from export-credentials as in Option B), but the synced-logs flow
+       is recommended: simpler, SSO-friendly, and no 1-hour token expiry.
+
 Housekeeping: add an S3 lifecycle rule on s3://<bucket>/spark-events/ (expire
 after 60-90 days) - one file per session accumulates forever otherwise.
 

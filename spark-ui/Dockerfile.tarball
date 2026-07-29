@@ -1,0 +1,44 @@
+# Spark History Server built from the Apache tarball, for orgs whose internal
+# registry does not mirror apache/spark. Use any Java 17 (or 11) base image your
+# registry provides; no apt/yum needed during build (ADD + tar only), so it
+# works on hardened/minimal bases.
+#
+# Build (defaults point at public mirrors; override with your artifact proxy):
+#   docker build -f Dockerfile.tarball -t glue-sparkui \
+#     --build-arg BASE_IMAGE=internal-registry.example.com/eclipse-temurin:17-jre-jammy \
+#     --build-arg APACHE_MIRROR=https://artifactory.example.com/apache-remote \
+#     --build-arg MAVEN_REPO=https://artifactory.example.com/maven-central-remote .
+#
+# Run: identical to the main Dockerfile - see OBSERVABILITY_SETUP.txt STEP 4.
+
+ARG BASE_IMAGE=eclipse-temurin:17-jre-jammy
+FROM ${BASE_IMAGE}
+
+ARG SPARK_VERSION=3.5.1
+ARG APACHE_MIRROR=https://archive.apache.org/dist
+ARG MAVEN_REPO=https://repo1.maven.org/maven2
+
+ADD ${APACHE_MIRROR}/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop3.tgz /tmp/spark.tgz
+RUN tar -xzf /tmp/spark.tgz -C /opt && \
+    mv /opt/spark-${SPARK_VERSION}-bin-hadoop3 /opt/spark && \
+    rm /tmp/spark.tgz
+
+# S3 support: hadoop-aws must match the Hadoop client bundled with Spark 3.5.x (3.3.4)
+ADD ${MAVEN_REPO}/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar /opt/spark/jars/
+ADD ${MAVEN_REPO}/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar /opt/spark/jars/
+RUN chmod 644 /opt/spark/jars/hadoop-aws-3.3.4.jar /opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar
+
+ENV SPARK_HOME=/opt/spark
+ENV LOG_DIR=file:/logs
+# keep the history server in the foreground so the container stays up
+ENV SPARK_NO_DAEMONIZE=true
+
+EXPOSE 18080
+
+CMD ["/bin/bash", "-c", "\
+  SPARK_HISTORY_OPTS=\"\
+    -Dspark.history.fs.logDirectory=${LOG_DIR} \
+    -Dspark.history.fs.update.interval=15s \
+    -Dspark.hadoop.fs.s3a.aws.credentials.provider=com.amazonaws.auth.DefaultAWSCredentialsProviderChain \
+    ${EXTRA_HISTORY_OPTS}\" \
+  /opt/spark/sbin/start-history-server.sh"]
