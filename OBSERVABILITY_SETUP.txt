@@ -164,6 +164,15 @@ OPTION B - read straight from S3 (live view of a run in progress):
       -e LOG_DIR=s3a://<bucket>/spark-events/ `
       glue-sparkui
 
+    NOTE - why not just mount ~/.aws and set AWS_PROFILE=ro-prd1?
+    The image bundles AWS SDK for Java v1 (required by hadoop-aws 3.3.4),
+    which cannot resolve SSO / Identity Center profiles - it only reads
+    static keys from ~/.aws/credentials. export-credentials converts the
+    SSO login into plain env vars the SDK understands. The exported
+    session token expires (typically after ~1 h); if the history server
+    stops loading new logs, re-run "aws sso login --profile ro-prd1" and
+    restart the container with freshly exported credentials.
+
 Then open  http://localhost:18080  - each Glue session appears as one Spark
 application (in-progress sessions show up too; refresh the page). Click one:
 
