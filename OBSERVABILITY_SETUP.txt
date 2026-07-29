@@ -213,6 +213,13 @@ Build:
 
 Run commands are identical to STEP 4 Options A and B above.
 
+Do not rely on the default APACHE_MIRROR (archive.apache.org): it is heavily
+throttled and often drops the ~400 MB tarball mid-download, which surfaces as
+"ADD ... unexpected EOF" from docker build (ADD has no retry). Always pass
+your artifact proxy. If you have no Apache proxy, download the tarball once
+with  curl -fLO --retry 10 <url>  (or a browser), drop it next to the
+Dockerfile, and change the ADD line to copy the local file instead.
+
 --------------------------------------------------------------------------------
  STEP 4-ALT-2 - no Docker: run the History Server natively on Windows
 --------------------------------------------------------------------------------

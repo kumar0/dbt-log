@@ -10,6 +10,11 @@
 #     --build-arg MAVEN_REPO=https://artifactory.example.com/maven-central-remote .
 #
 # Run: identical to the main Dockerfile - see OBSERVABILITY_SETUP.txt STEP 4.
+#
+# NOTE: the default APACHE_MIRROR (archive.apache.org) is heavily throttled and
+# often drops the ~400 MB tarball mid-download ("unexpected EOF" from ADD, which
+# has no retry). Point APACHE_MIRROR at your Artifactory/Nexus apache-remote
+# proxy - that is the intended use anyway.
 
 ARG BASE_IMAGE=eclipse-temurin:17-jre-jammy
 FROM ${BASE_IMAGE}
